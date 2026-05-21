@@ -1,0 +1,158 @@
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+
+def build_session(retries=3, backoff=0.5):
+    s = requests.Session()
+    retry = Retry(
+        total=retries,
+        connect=retries,
+        read=retries,
+        status=retries,
+        backoff_factor=backoff,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["GET"]),
+        raise_on_status=False,
+    )
+    s.mount("https://", HTTPAdapter(max_retries=retry))
+    return s
+
+
+def geocode_city(session, city: str, timeout=5):
+    """
+    City name -> (name, country, lat, lon)
+    Uses Open-Meteo Geocoding API
+    """
+    url = "https://geocoding-api.open-meteo.com/v1/search"
+    params = {"name": city, "count": 1, "language": "en", "format": "json"}
+
+    try:
+        r = session.get(url, params=params, timeout=timeout)
+    except requests.exceptions.Timeout:
+        print("⏳ Geocoding timeout. Try again.")
+        return None
+    except requests.exceptions.RequestException as e:
+        print("❌ Network error in geocoding:", e)
+        return None
+
+    if r.status_code != 200:
+        print(f"❌ Geocoding failed. HTTP {r.status_code}")
+        return None
+
+    data = r.json()
+    results = data.get("results", [])
+    if not results:
+        print("😕 City not found. Try spelling or add country (e.g., 'Guwahati, India').")
+        return None
+
+    top = results[0]
+    return {
+        "name": top.get("name", city),
+        "country": top.get("country", ""),
+        "lat": top.get("latitude"),
+        "lon": top.get("longitude"),
+        "timezone": top.get("timezone", "auto"),
+    }
+
+
+def get_weather(session, lat, lon, timezone="auto", timeout=5):
+    """
+    lat/lon -> current weather + today's min/max (daily)
+    Uses Open-Meteo Forecast API
+    """
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "current": "temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m",
+        "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum",
+        "timezone": timezone,   # required for daily nicely in local time
+        "forecast_days": 1
+    }
+
+    try:
+        r = session.get(url, params=params, timeout=timeout)
+    except requests.exceptions.Timeout:
+        print("⏳ Weather API timeout. Try again.")
+        return None
+    except requests.exceptions.RequestException as e:
+        print("❌ Network error in weather:", e)
+        return None
+
+    if r.status_code != 200:
+        print(f"❌ Weather fetch failed. HTTP {r.status_code}")
+        return None
+
+    return r.json()
+
+
+def wmo_code_to_text(code: int) -> str:
+    """
+    Simple mapping (not full list). Enough for bot output.
+    """
+    mapping = {
+        0: "Clear sky",
+        1: "Mainly clear",
+        2: "Partly cloudy",
+        3: "Overcast",
+        45: "Fog",
+        48: "Depositing rime fog",
+        51: "Light drizzle",
+        53: "Moderate drizzle",
+        55: "Dense drizzle",
+        61: "Slight rain",
+        63: "Moderate rain",
+        65: "Heavy rain",
+        71: "Slight snow",
+        73: "Moderate snow",
+        75: "Heavy snow",
+        80: "Rain showers",
+        95: "Thunderstorm",
+    }
+    return mapping.get(code, f"Weather code {code}")
+
+
+def print_weather(city_info, weather_json):
+    cur = weather_json.get("current", {})
+    daily = weather_json.get("daily", {})
+
+    temp = cur.get("temperature_2m")
+    feels = cur.get("apparent_temperature")
+    hum = cur.get("relative_humidity_2m")
+    wind = cur.get("wind_speed_10m")
+    code = cur.get("weather_code")
+
+    tmax = (daily.get("temperature_2m_max") or [None])[0]
+    tmin = (daily.get("temperature_2m_min") or [None])[0]
+    rain = (daily.get("precipitation_sum") or [None])[0]
+
+    print("\n================ WEATHER BOT ================\n")
+    print(f"📍 Location: {city_info['name']}, {city_info['country']}")
+    print(f"🌡️ Current: {temp}°C  (Feels like: {feels}°C)")
+    print(f"💧 Humidity: {hum}%")
+    print(f"🌬️ Wind: {wind} km/h")
+    print(f"🌤️ Condition: {wmo_code_to_text(code)}")
+    print(f"📅 Today: Min {tmin}°C | Max {tmax}°C | Rain {rain} mm")
+    print("\n============================================\n")
+
+
+def main():
+    session = build_session()
+
+    print("🟦 Weather Bot (free, no API key)")
+    city = input("Enter city (e.g., Guwahati / Delhi / Mumbai): ").strip()
+
+    city_info = geocode_city(session, city)
+    if not city_info:
+        return
+
+    weather = get_weather(session, city_info["lat"], city_info["lon"], timezone=city_info["timezone"])
+    if not weather:
+        return
+
+    print_weather(city_info, weather)
+
+
+if __name__ == "__main__":
+    main()
